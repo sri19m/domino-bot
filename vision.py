@@ -27,8 +27,10 @@ BOARD_AREA = (0.0025 * _REF, 0.03 * _REF)
 HAND_AREA = (0.0008 * _REF, 0.012 * _REF)
 BOARD_RATIO = (1.4, 2.8)
 HAND_RATIO = (1.2, 3.2)
+BOARD_CLOSE = 15      # board mask: close pips, then open to strip face-down rims (px at WORK_W)
+BOARD_OPEN = 21
 MIN_SOLID = 0.7        # fraction of the blob that is cream; face-down tile borders fail this
-MIN_FILL = 0.7         # blob area / min-area-rect area
+MIN_FILL = 0.6         # blob area / min-area-rect area
 # (S max, V min) tried in order; second is a looser fallback for bright or washed-out displays
 MASK_TIERS = [(None, None), (100, 160)]
 
@@ -38,17 +40,21 @@ def _crop(img, region):
     x0, y0 = int(x * W), int(y * H)
     return img[y0:y0 + int(h * H), x0:x0 + int(w * W)], (x0, y0)
 
-def _tile_mask(img, s_max=None, v_min=None):
+def _tile_mask(img, s_max=None, v_min=None, close_k=7, open_k=0):
     s_max = config.TILE_S_MAX if s_max is None else s_max
     v_min = config.TILE_V_MIN if v_min is None else v_min
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     m = cv2.inRange(hsv, (0, 0, v_min), (180, s_max, 255))
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))  # fill pips so tile is one blob
+    ell = cv2.MORPH_ELLIPSE
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(ell, (close_k, close_k)))  # fill pips so tile is one blob
+    if open_k:
+        # remove thin cream rims of face-down tiles that would otherwise join face-up tiles into one blob
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(ell, (open_k, open_k)))
     return m
 
-def _candidates(crop, ox, oy, area_rng, ratio_rng, tier):
+def _candidates(crop, ox, oy, area_rng, ratio_rng, tier, close_k=7, open_k=0):
     """Return list of dicts describing every blob and whether it looks like a tile."""
-    mask = _tile_mask(crop, *tier)
+    mask = _tile_mask(crop, *tier, close_k=close_k, open_k=open_k)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     out = []
     for c in cnts:
@@ -84,19 +90,45 @@ def _record(cands, log):
     for k in cands:
         log.append({"box": k["box"], "ok": k["ok"], "text": k["reason"] or "ok"})
 
-def _count_pips(half):
-    hsv = cv2.cvtColor(half, cv2.COLOR_BGR2HSV)
-    pip = ((hsv[..., 1] > 70) | (hsv[..., 2] < 130)).astype(np.uint8) * 255
+def _count_pips(warp):
+    """Count pips in each half of an upright tile warp. Returns (left, right)."""
+    hsv = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
+    h_, s_, v_ = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    pip = ((s_ > 70) | (v_ < 130)).astype(np.uint8) * 255
+    S, L = pip.shape[:2]
+    mid = L / 2
+    # An overlay such as the tutorial pointing hand can merge with pips into one large blob that
+    # touches the tile edge. Inside such blobs only, strip skin-coloured pixels (bright, moderately
+    # saturated orange) so the pips underneath separate out again. Ordinary pips are left untouched.
+    skin = ((h_ <= 25) & (s_ < 180) & (v_ > 150)).astype(np.uint8) * 255
+    n, lab, st, _ = cv2.connectedComponentsWithStats(pip)
+    big = np.zeros(n, bool)
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        touches = x <= 0 or y <= 0 or x + w >= L or y + h >= S
+        big[i] = touches or a > 0.1 * S * mid
+    pip[big[lab] & (skin > 0)] = 0
     pip = cv2.morphologyEx(pip, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     cnts, _ = cv2.findContours(pip, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    areas = [cv2.contourArea(c) for c in cnts]
-    min_a = 0.012 * half.shape[0] * half.shape[1]
-    areas = [a for a in areas if a >= min_a]
-    if not areas:
-        return 0
-    med = np.median(areas)
-    # merged blobs count as several pips
-    return min(12, int(sum(max(1, round(a / med)) for a in areas)))
+    min_a = 0.012 * S * mid
+    halves = ([], [])
+    for c in cnts:
+        x, y, w, h = cv2.boundingRect(c)
+        # blobs touching the warp edge are background showing past a loose tile rect, not pips
+        if x <= 0 or y <= 0 or x + w >= L or y + h >= S:
+            continue
+        a = cv2.contourArea(c)
+        if a < min_a:
+            continue
+        m = cv2.moments(c)
+        cx = m["m10"] / m["m00"] if m["m00"] else x + w / 2
+        halves[0 if cx < mid else 1].append(a)
+    allv = halves[0] + halves[1]
+    if not allv:
+        return 0, 0
+    med = np.median(allv)
+    # slivers well below a typical pip are background/shading; merged blobs count as several pips
+    return tuple(min(6, int(sum(round(a / med) for a in h if a >= 0.6 * med))) for h in halves)
 
 def read_tile(img, contour):
     """Return (value_a, value_b, centre_xy) for one face-up tile contour."""
@@ -113,11 +145,7 @@ def read_tile(img, contour):
     dst = np.array([[0, 0], [L, 0], [L, S], [0, S]], np.float32)
     M = cv2.getPerspectiveTransform(box, dst)
     warp = cv2.warpPerspective(img, M, (L, S))
-    mx, my = int(L * 0.05), int(S * 0.12)
-    warp = warp[my:S - my, mx:L - mx]
-    mid = warp.shape[1] // 2
-    a = _count_pips(warp[:, :mid - 2])
-    b = _count_pips(warp[:, mid + 2:])
+    a, b = _count_pips(warp)
     return a, b, (cx, cy)
 
 def find_hand(img_small, log=None):
@@ -137,7 +165,7 @@ def find_hand(img_small, log=None):
 def find_board(img_small, log=None):
     crop, (ox, oy) = _crop(img_small, config.BOARD_REGION)
     for tier in MASK_TIERS:
-        cands = _candidates(crop, ox, oy, BOARD_AREA, BOARD_RATIO, tier)
+        cands = _candidates(crop, ox, oy, BOARD_AREA, BOARD_RATIO, tier, BOARD_CLOSE, BOARD_OPEN)
         _record(cands, log)
         tiles = []
         for k in cands:
@@ -153,7 +181,7 @@ def find_board(img_small, log=None):
 
 def debug_dump(img_small, log, hand, tiles, mask_path, out_path):
     """Write the cream mask and an image with every candidate blob and its verdict."""
-    cv2.imwrite(mask_path, _tile_mask(img_small))
+    cv2.imwrite(mask_path, _tile_mask(img_small, close_k=BOARD_CLOSE, open_k=BOARD_OPEN))
     out = img_small.copy()
     H, W = out.shape[:2]
     for region, col in ((config.BOARD_REGION, (255, 255, 0)), (config.HAND_REGION, (255, 0, 255))):

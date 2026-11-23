@@ -79,6 +79,97 @@ def check(img, label):
         print(f"        wanted hand={norm(HAND)} board={want_b}")
     return ok
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+REAL_FIXTURE = os.path.join(HERE, "tests", "fixtures", "real_level_1.png")
+# Ground truth for the real 2316x1080 capture: values and tap centres in full-res pixels.
+REAL_HAND = ((1, 3), (1493, 957))
+REAL_BOARD = [
+    ((2, 3), (960, 390), True),    # partly covered by the tutorial hand: off-by-one tolerated with a warning
+    ((1, 6), (570, 630), False),
+    ((5, 6), (1160, 775), False),
+    ((0, 5), (1355, 395), False),
+    ((0, 4), (1745, 625), False),
+]
+POS_TOL = 40
+
+def check_real(path=REAL_FIXTURE):
+    """Regression test on a real phone capture. Skipped (passes) when the fixture is missing."""
+    img = cv2.imread(path)
+    if img is None:
+        print(f"[SKIP] real capture: {path} not found")
+        return True
+    im, _ = vision.normalize(img)
+    small, s = vision.downscale(im)
+    hand = vision.find_hand(small)
+    tiles = [(norm(t["vals"]), (t["pos"][0] / s, t["pos"][1] / s)) for t in vision.find_board(small)]
+    errs, warns = [], []
+    near = lambda p, q: abs(p[0] - q[0]) <= POS_TOL and abs(p[1] - q[1]) <= POS_TOL
+    if not hand:
+        errs.append("no hand")
+    else:
+        hp = (hand["pos"][0] / s, hand["pos"][1] / s)
+        if norm(hand["vals"]) != REAL_HAND[0] or not near(hp, REAL_HAND[1]):
+            errs.append(f"hand {norm(hand['vals'])} at {hp[0]:.0f},{hp[1]:.0f}")
+    used = set()
+    for want, pos, lenient in REAL_BOARD:
+        idx = [i for i, (_, p) in enumerate(tiles) if i not in used and near(p, pos)]
+        if not idx:
+            errs.append(f"no tile near {pos} (want {want})")
+            continue
+        i = idx[0]
+        used.add(i)
+        got = tiles[i][0]
+        if got == want:
+            continue
+        diff = sum(abs(a - b) for a, b in zip(got, want))
+        if lenient and diff == 1:
+            warns.append(f"tile near {pos} read {got}, expected {want} (occluded)")
+        else:
+            errs.append(f"tile near {pos} read {got}, expected {want}")
+    extra = [tiles[i] for i in range(len(tiles)) if i not in used]
+    if extra:
+        errs.append(f"unexpected tiles {[(v, (int(p[0]), int(p[1]))) for v, p in extra]}")
+    for w in warns:
+        print(f"        WARNING: {w}")
+    ok = not errs
+    print(f"[{'PASS' if ok else 'FAIL'}] real capture {os.path.basename(path)}: "
+          f"hand={hand and norm(hand['vals'])} board={sorted(v for v, _ in tiles)}")
+    for e in errs:
+        print(f"        {e}")
+    return ok
+
+def check_screens():
+    """screens._load must treat a missing folder, missing, empty or invalid screens.json as no screens."""
+    import tempfile
+    import screens
+    old_dir, old_index = screens.DIR, screens.INDEX
+    ok = True
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            cases = {"missing folder": None, "missing screens.json": "", "empty file": b"",
+                     "invalid json": b"{not json", "not a list": b'{"a": 1}'}
+            for label, content in cases.items():
+                sd = os.path.join(d, label.replace(" ", "_"))
+                if content is not None:
+                    os.makedirs(sd)
+                    if content != "":
+                        with open(os.path.join(sd, "screens.json"), "wb") as f:
+                            f.write(content)
+                screens.DIR, screens.INDEX = sd, os.path.join(sd, "screens.json")
+                try:
+                    got = screens._load()
+                    hit = screens.match(np.zeros((100, 200, 3), np.uint8))
+                    good = got == [] and hit is None
+                except Exception as e:  # noqa: BLE001 - any crash is a failure here
+                    good, got = False, repr(e)
+                ok &= good
+                if not good:
+                    print(f"        screens {label}: got {got}")
+    finally:
+        screens.DIR, screens.INDEX = old_dir, old_index
+    print(f"[{'PASS' if ok else 'FAIL'}] screens: missing/empty/invalid index treated as no screens")
+    return ok
+
 def main():
     base = scene()
     os.makedirs("debug", exist_ok=True)
@@ -87,6 +178,8 @@ def main():
     ok &= check(cv2.resize(base, (2316, 1080), interpolation=cv2.INTER_CUBIC), "2316x1080")
     ok &= check(cv2.resize(base, (3088, 1440), interpolation=cv2.INTER_CUBIC), "3088x1440")
     ok &= check(cv2.rotate(base, cv2.ROTATE_90_CLOCKWISE), "portrait (rotated 90 cw)")
+    ok &= check_real()
+    ok &= check_screens()
     for p in sorted(glob.glob("reference/*.png") + glob.glob("reference/*.jpg")):
         img = cv2.imread(p)
         im, _ = vision.normalize(img)

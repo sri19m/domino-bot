@@ -10,7 +10,7 @@ Phone: enable Developer options > USB debugging, connect by USB, accept the prom
 
 ## Testing without a phone
 
-- `python selftest.py` draws a synthetic board (rotated tiles, vertical hand tile, deck, undo button), runs detection at several resolutions and as a portrait capture, and must print `ALL PASS`. PNG/JPG files in a `reference/` folder are also run through the pipeline and their results printed.
+- `python selftest.py` draws a synthetic board (rotated tiles, vertical hand tile, deck, undo button), runs detection at several resolutions and as a portrait capture, and must print `ALL PASS`. It also checks the real phone capture `tests/fixtures/real_level_1.png` against its known tiles (skipped if the file is missing) and checks that a missing or broken `screens/screens.json` is treated as "no screens". PNG/JPG files in a `reference/` folder are also run through the pipeline and their results printed.
 - `python main.py --image path\to\screenshot.png` runs the same analysis as `--once` on a saved screenshot.
 
 ## Troubleshooting: `hand: None board: []`

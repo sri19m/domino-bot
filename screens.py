@@ -4,7 +4,16 @@ DIR = os.path.join(os.path.dirname(__file__), "screens")
 INDEX = os.path.join(DIR, "screens.json")
 
 def _load():
-    return json.load(open(INDEX)) if os.path.exists(INDEX) else []
+    """Learned screens. A missing folder, missing/empty/invalid screens.json all mean 'no screens'."""
+    try:
+        with open(INDEX, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    keys = ("name", "file", "roi", "tap")
+    return [s for s in data if isinstance(s, dict) and all(k in s for k in keys)]
 
 def match(img):
     H, W = img.shape[:2]
@@ -56,6 +65,7 @@ def teach(img):
     entry = {"name": name, "file": fname, "roi": [rx, ry, rw, rh],
              "tap": [clicked[0][0] / view.shape[1], clicked[0][1] / view.shape[0]]}
     data = [s for s in _load() if s["name"] != name] + [entry]
-    json.dump(data, open(INDEX, "w"), indent=2)
+    with open(INDEX, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
     print(f"Saved '{name}'.")
     return entry
