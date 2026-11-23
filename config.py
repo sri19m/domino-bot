@@ -10,7 +10,7 @@ CHAIN = True
 
 # Landscape reference layout measured from your 1024x477 screenshots.
 BOARD_REGION = (0.15, 0.12, 0.70, 0.70)   # where board tiles live
-HAND_REGION = (0.58, 0.80, 0.14, 0.20)    # face-up tile at the bottom
+HAND_REGION = (0.55, 0.72, 0.25, 0.28)    # bottom strip right of the deck; the tile-like blob in it is the hand
 DECK_TAP = (0.51, 0.90)                   # tap here to draw from the deck
 
 # Timing
