@@ -1,5 +1,6 @@
 """Learn and recognise non-gameplay screens (home, start dialog, win, popups)."""
 import json, os, cv2
+import vision
 DIR = os.path.join(os.path.dirname(__file__), "screens")
 INDEX = os.path.join(DIR, "screens.json")
 
@@ -33,11 +34,17 @@ def match(img):
 
 def teach(img):
     """Ask the user to draw a box around something unique on the screen, then click where to tap."""
+    if vision.find_hand(vision.downscale(vision.normalize(img)[0])[0]) is not None:
+        print("Refusing to teach: a hand tile is visible, so this is a gameplay screen. "
+              "Only teach menus, level start, win or popups.")
+        return None
     os.makedirs(DIR, exist_ok=True)
     H, W = img.shape[:2]
     scale = 1100 / W
     view = cv2.resize(img, None, fx=scale, fy=scale)
-    print("\nUNKNOWN SCREEN. 1) Drag a box around a fixed, unique element (title text/button), press ENTER.")
+    print("\nUNKNOWN SCREEN. Do NOT teach a gameplay screen (tiles on the board, even mid-animation).")
+    print("To skip: press Esc or c in the selector, or leave the name empty.")
+    print("1) Drag a box around a fixed, unique element (title text/button), press ENTER.")
     x, y, w, h = cv2.selectROI("teach: select unique region", view, showCrosshair=False)
     cv2.destroyAllWindows()
     if w == 0 or h == 0:
@@ -56,7 +63,13 @@ def teach(img):
     cv2.destroyAllWindows()
     if not clicked:
         return None
-    name = input("Name for this screen (e.g. level_start, win, out_of_tiles): ").strip() or f"screen{len(_load())}"
+    name = input("Name for this screen (e.g. level_start, win, out_of_tiles; empty = skip): ").strip()
+    if not name:
+        print("Skipped, nothing saved.")
+        return None
+    if any(c in name for c in '/\\:'):
+        print("Invalid name, nothing saved.")
+        return None
     rx, ry, rw, rh = x / view.shape[1], y / view.shape[0], w / view.shape[1], h / view.shape[0]
     x0, y0 = int(rx * W), int(ry * H)
     patch = img[y0:y0 + int(rh * H), x0:x0 + int(rw * W)]

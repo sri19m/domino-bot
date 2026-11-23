@@ -170,6 +170,81 @@ def check_screens():
     print(f"[{'PASS' if ok else 'FAIL'}] screens: missing/empty/invalid index treated as no screens")
     return ok
 
+class FakeDev:
+    """Serves a scripted list of frames (the last one repeats) and records taps."""
+    def __init__(self, frames):
+        self.frames, self.i, self.taps = frames, 0, []
+    def screenshot(self):
+        img = self.frames[min(self.i, len(self.frames) - 1)]
+        self.i += 1
+        return img.copy()
+    def tap_px(self, x, y):
+        self.taps.append(("px", x, y))
+    def tap_frac(self, fx, fy):
+        self.taps.append(("frac", fx, fy))
+
+def check_loop():
+    """Offline simulation of the main loop decisions with a fake device and fake clock."""
+    import main
+    real = cv2.imread(REAL_FIXTURE)
+    if real is None:
+        print(f"[SKIP] loop: {REAL_FIXTURE} not found")
+        return True
+    blank = np.full(real.shape, 30, np.uint8)
+    menu = np.full(real.shape, 90, np.uint8)
+    cv2.putText(menu, "PLAY", (400, 500), cv2.FONT_HERSHEY_SIMPLEX, 6, (255, 255, 255), 12)
+    errs = []
+
+    def run(frames, steps, known=None):
+        dev, now, calls = FakeDev(frames), [0.0], {"match": 0, "teach": 0}
+        def sleep(t): now[0] += t
+        def match(img):
+            calls["match"] += 1
+            return known
+        def teach(img):
+            calls["teach"] += 1
+            return None
+        bot = main.Bot(dev, match=match, teach=teach, sleep=sleep, clock=lambda: now[0])
+        res = [bot.step() for _ in range(steps)]
+        return res, calls, dev, now[0]
+
+    # 1. real gameplay: taps, never match/teach, even for many steps (stuck frames draw instead)
+    moving = []
+    for k in range(12):  # board changes between frames, as after real moves
+        f = real.copy()
+        f[:300, :200 + 100 * k] = 0
+        moving.append(f)
+    res, calls, dev, _ = run(moving, 12, known={"name": "x", "tap": [0.5, 0.5]})
+    if calls["match"] or calls["teach"]:
+        errs.append(f"gameplay frames reached match/teach {calls}")
+    if not dev.taps or any(t[0] == "frac" for t in dev.taps):
+        errs.append("gameplay produced no taps or tapped a learned-screen position")
+    # 1b. frozen gameplay: draws first, only then is the screen treated as non-gameplay
+    res, calls, dev, _ = run([real], 12, known=None)
+    px = [x for x in dev.taps if x[0] == "px"]
+    if not px or calls["match"] != 1:
+        errs.append(f"frozen gameplay: {calls} taps={len(px)}")
+    # 2. transient frames, then gameplay: no prompt, no match
+    res, calls, dev, _ = run([blank, blank, blank, real], 1)
+    if res != ["gameplay"] or calls["match"] or calls["teach"]:
+        errs.append(f"transient frames: {res} {calls}")
+    # 3. non-gameplay: polls ~POLL_TOTAL before match/teach, then prompts once per step
+    res, calls, dev, t = run([menu], 1)
+    if t < main.POLL_TOTAL or calls != {"match": 1, "teach": 1} or res != ["skipped"]:
+        errs.append(f"non-gameplay: {res} {calls} t={t}")
+    # 4. non-gameplay with a learned screen: taps it, no teach
+    res, calls, dev, _ = run([menu], 1, known={"name": "play", "tap": [0.5, 0.5]})
+    if res != ["known"] or calls["teach"] or dev.taps != [("frac", 0.5, 0.5)]:
+        errs.append(f"known screen: {res} {calls} {dev.taps}")
+    # 5. teach refuses a gameplay frame
+    import screens
+    if screens.teach(real) is not None:
+        errs.append("teach accepted a gameplay frame")
+    for e in errs:
+        print("        " + e)
+    print(f"[{'PASS' if not errs else 'FAIL'}] loop: gameplay never teaches/taps screens, transient frames poll first")
+    return not errs
+
 def main():
     base = scene()
     os.makedirs("debug", exist_ok=True)
@@ -180,6 +255,7 @@ def main():
     ok &= check(cv2.rotate(base, cv2.ROTATE_90_CLOCKWISE), "portrait (rotated 90 cw)")
     ok &= check_real()
     ok &= check_screens()
+    ok &= check_loop()
     for p in sorted(glob.glob("reference/*.png") + glob.glob("reference/*.jpg")):
         img = cv2.imread(p)
         im, _ = vision.normalize(img)

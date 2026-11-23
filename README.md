@@ -6,7 +6,10 @@ Phone: enable Developer options > USB debugging, connect by USB, accept the prom
 
 1. `python main.py --once` while a level is on screen: prints detected tiles and writes `debug/once.png`. Verify the numbers.
 2. Adjust `RULE`, `CHAIN`, regions in `config.py` if needed.
-3. `python main.py --debug` to run. On any unknown screen it opens a window: drag a box around a unique element, click where to tap, name it. It remembers it.
+3. `python main.py --debug` to run. Any frame with a hand tile or board tiles is gameplay: the bot only plays or draws, and never checks or teaches screens. If neither is visible it re-reads every 0.3 s for about 4 s (animations), then tries learned screens, then asks you to teach. The unknown frame is saved to `debug/unknown_<time>.png`.
+4. Teaching: only teach menus, level start, win or popup screens, never gameplay. Drag a box around a unique element and press ENTER, click where to tap, name it. Esc or `c` in the box selector, or an empty name, skips. A frame with a hand tile is refused.
+5. If you taught a gameplay screen by mistake (the bot taps one spot over and over), delete the learned screens: `Remove-Item -Recurse screens` (PowerShell).
+6. If the board stops changing the bot draws from the deck; if it still does not change after the draw, the screen is treated as non-gameplay.
 
 ## Testing without a phone
 
